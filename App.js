@@ -1,16 +1,27 @@
 import React, { useState, useRef } from 'react';
 import {
-  View, Text, TouchableOpacity, StyleSheet, ActivityIndicator, Alert,
-  ScrollView, Modal, Image, Dimensions
+  View,
+  Text,
+  TouchableOpacity,
+  StyleSheet,
+  ActivityIndicator,
+  Alert,
+  ScrollView,
+  Modal,
+  Image,
+  Dimensions,
+  TextInput,
 } from 'react-native';
 import { CameraView, useCameraPermissions } from 'expo-camera';
 import * as FileSystem from 'expo-file-system';
 import * as ImageManipulator from 'expo-image-manipulator';
+import goatCards from './assets/goat.json';
 
-const OCR_API_KEY = 'K86494140488957'; // Inserisci qui la tua API key OCR.Space
+const OCR_API_KEY = 'K86494140488957';
 
 const screenWidth = Dimensions.get('window').width;
 const screenHeight = Dimensions.get('window').height;
+
 const RECT_WIDTH = screenWidth * 0.5;
 const RECT_HEIGHT = screenHeight * 0.05;
 const RECT_LEFT = (screenWidth - RECT_WIDTH) / 2;
@@ -24,7 +35,9 @@ export default function App() {
   const [ocrResult, setOcrResult] = useState(null);
   const [croppedUri, setCroppedUri] = useState(null);
   const [modalVisible, setModalVisible] = useState(false);
-  const [cardImage, setCardImage] = useState(null);
+  const [cardInfo, setCardInfo] = useState(null);
+  const [manualIdInputVisible, setManualIdInputVisible] = useState(false);
+  const [manualId, setManualId] = useState('');
   const cameraRef = useRef(null);
 
   if (!permission) {
@@ -62,7 +75,6 @@ export default function App() {
         [{ resize: { width } }],
         { compress: quality, format: ImageManipulator.SaveFormat.JPEG }
       );
-
       compressedUri = manipResult.uri;
       fileInfo = await FileSystem.getInfoAsync(compressedUri);
       quality -= 0.1;
@@ -107,15 +119,12 @@ export default function App() {
 
         const cropped = await ImageManipulator.manipulateAsync(
           photoUri,
-          [
-            { crop: { originX: cropX, originY: cropY, width: cropWidth, height: cropHeight } }
-          ],
+          [{ crop: { originX: cropX, originY: cropY, width: cropWidth, height: cropHeight } }],
           { compress: 1, format: ImageManipulator.SaveFormat.JPEG }
         );
 
         setCroppedUri(cropped.uri);
         setModalVisible(true);
-
       } catch (error) {
         Alert.alert('Errore', 'Errore durante lo scatto: ' + error.message);
       }
@@ -144,63 +153,70 @@ export default function App() {
       });
 
       const result = await response.json();
+      setLoading(false);
 
       if (result.IsErroredOnProcessing) {
-        setLoading(false);
         Alert.alert('OCR Error', result.ErrorMessage.join('\n'));
         return;
       }
 
-      const rawText = result.ParsedResults[0].ParsedText || '';
-      const parsedId = rawText.replace(/[^\d]/g, '').trim();
-
-      if (!parsedId || isNaN(parsedId)) {
-        setLoading(false);
-        Alert.alert('Errore', 'OCR non ha rilevato un ID numerico valido.');
+      const text = result.ParsedResults[0].ParsedText.trim();
+      const numericId = text.replace(/\D/g, '');
+      if (numericId.length === 0) {
+        Alert.alert('Errore OCR', 'ID non rilevato o non valido.');
         return;
       }
 
-      async function fetchCardInfoById(cardId) {
-        try {
-          const responseEng = await fetch(`https://db.ygoprodeck.com/api/v7/cardinfo.php?id=${cardId}`);
-          const dataEng = await responseEng.json();
-
-          if (!dataEng.data || dataEng.data.length === 0) {
-            throw new Error('Carta non trovata.');
-          }
-
-          const cardEng = dataEng.data[0];
-
-          const responseIt = await fetch(`https://db.ygoprodeck.com/api/v7/cardinfo.php?id=${cardId}&language=it`);
-          const dataIt = await responseIt.json();
-          const cardIt = dataIt.data?.[0];
-
-          return {
-            name_en: cardEng.name,
-            name_it: cardIt?.name || 'Nome IT non disponibile',
-            image: cardEng.card_images?.[0]?.image_url,
-            price: cardEng.card_prices?.[0]?.cardmarket_price || 'N/A',
-          };
-        } catch (error) {
-          console.error('Errore fetchCardInfoById:', error.message);
-          return null;
-        }
-      }
-
-      const cardData = await fetchCardInfoById(parsedId);
+      fetchCardInfo(numericId);
+    } catch (error) {
       setLoading(false);
+      Alert.alert('Errore', error.message);
+    }
+  }
 
-      if (cardData) {
-        setOcrResult(
-          `Nome IT: ${cardData.name_it}\nNome EN: ${cardData.name_en}\nPrezzo Cardmarket: €${cardData.price}`
-        );
-        setCardImage(cardData.image);
-        setCameraOpen(false);
-        setCroppedUri(null);
-      } else {
+  async function fetchCardInfo(id) {
+    try {
+      setLoading(true);
+
+      const [resEng, resIt] = await Promise.all([
+        fetch(`https://db.ygoprodeck.com/api/v7/cardinfo.php?id=${id}`),
+        fetch(`https://db.ygoprodeck.com/api/v7/cardinfo.php?id=${id}&language=it`),
+      ]);
+
+      const jsonEng = await resEng.json();
+      const jsonIt = await resIt.json();
+
+      if (!jsonEng.data || !jsonIt.data) {
         Alert.alert('Errore', 'Carta non trovata.');
+        setLoading(false);
+        return;
       }
 
+      const cardEng = jsonEng.data[0];
+      const cardIt = jsonIt.data[0];
+      const price = cardEng.card_prices?.[0]?.cardmarket_price || 'N/A';
+      const imageUrl = cardEng.card_images?.[0]?.image_url || '';
+
+      const isGoat = goatCards.some((card) => {
+        const numericId = Number(id);
+        return card.id === numericId || card.id_images.includes(numericId);
+        });
+
+
+     
+      setCardInfo({
+        id,
+        nameEng: cardEng.name,
+        nameIt: cardIt.name,
+        price,
+        imageUrl,
+        goatFormat: isGoat ? 'Si' : 'No',
+      });
+
+      setCameraOpen(false);
+      setCroppedUri(null);
+      setOcrResult(null);
+      setLoading(false);
     } catch (error) {
       setLoading(false);
       Alert.alert('Errore', error.message);
@@ -211,23 +227,22 @@ export default function App() {
     return (
       <View style={styles.center}>
         <ActivityIndicator size="large" color="#0066cc" />
-        <Text style={{ marginTop: 10 }}>Elaborazione immagine...</Text>
+        <Text style={{ marginTop: 10 }}>Elaborazione...</Text>
       </View>
     );
   }
 
-  if (ocrResult !== null) {
+  if (cardInfo) {
     return (
       <ScrollView contentContainerStyle={styles.center}>
-        {cardImage && (
-          <Image source={{ uri: cardImage }} style={{ width: 200, height: 300, marginBottom: 20 }} />
-        )}
-        <Text style={styles.ocrText}>{ocrResult}</Text>
-        <TouchableOpacity style={styles.button} onPress={() => {
-          setOcrResult(null);
-          setCardImage(null);
-        }}>
-          <Text style={styles.buttonText}>Torna alla Camera</Text>
+        <Text style={styles.ocrText}>ID: {cardInfo.id}</Text>
+        <Text style={styles.ocrText}>Nome (IT): {cardInfo.nameIt}</Text>
+        <Text style={styles.ocrText}>Nome (EN): {cardInfo.nameEng}</Text>
+        <Text style={styles.ocrText}>Prezzo Cardmarket: €{cardInfo.price}</Text>
+        <Text style={[styles.ocrText, { fontWeight: 'bold' }]}>Goat Format: {cardInfo.goatFormat}</Text>
+        <Image source={{ uri: cardInfo.imageUrl }} style={{ width: 200, height: 300, marginVertical: 20 }} />
+        <TouchableOpacity style={styles.button} onPress={() => setCardInfo(null)}>
+          <Text style={styles.buttonText}>Torna indietro</Text>
         </TouchableOpacity>
       </ScrollView>
     );
@@ -236,9 +251,17 @@ export default function App() {
   return (
     <View style={styles.container}>
       {!cameraOpen ? (
-        <TouchableOpacity style={styles.openButton} onPress={() => setCameraOpen(true)}>
-          <Text style={styles.buttonText}>Apri Fotocamera</Text>
-        </TouchableOpacity>
+        <View style={styles.center}>
+          <TouchableOpacity style={styles.openButton} onPress={() => setCameraOpen(true)}>
+            <Text style={styles.buttonText}>Apri Fotocamera</Text>
+          </TouchableOpacity>
+          <TouchableOpacity
+            style={[styles.openButton, { backgroundColor: '#28a745' }]}
+            onPress={() => setManualIdInputVisible(true)}
+          >
+            <Text style={styles.buttonText}>Inserisci ID manualmente</Text>
+          </TouchableOpacity>
+        </View>
       ) : (
         <>
           <CameraView style={styles.camera} facing={facing} ref={cameraRef} />
@@ -257,13 +280,13 @@ export default function App() {
           />
           <View style={styles.controls}>
             <TouchableOpacity style={styles.controlButton} onPress={toggleCamera}>
-              <Text style={styles.buttonText}>Flip Camera</Text>
+              <Text style={styles.buttonText}>Flip</Text>
             </TouchableOpacity>
             <TouchableOpacity style={styles.controlButton} onPress={takePicture}>
-              <Text style={styles.buttonText}>Scatta Foto</Text>
+              <Text style={styles.buttonText}>Scatta</Text>
             </TouchableOpacity>
             <TouchableOpacity style={styles.controlButton} onPress={() => setCameraOpen(false)}>
-              <Text style={styles.buttonText}>Chiudi Camera</Text>
+              <Text style={styles.buttonText}>Chiudi</Text>
             </TouchableOpacity>
           </View>
           <Modal visible={modalVisible} transparent={false} animationType="slide">
@@ -292,6 +315,33 @@ export default function App() {
           </Modal>
         </>
       )}
+      <Modal visible={manualIdInputVisible} transparent animationType="slide">
+        <View style={styles.center}>
+          <Text style={{ fontSize: 18, marginBottom: 10 }}>Inserisci l'ID della carta</Text>
+          <TextInput
+            style={styles.input}
+            placeholder="Es. 46986414"
+            keyboardType="numeric"
+            value={manualId}
+            onChangeText={setManualId}
+          />
+          <TouchableOpacity
+            style={styles.button}
+            onPress={() => {
+              setManualIdInputVisible(false);
+              fetchCardInfo(manualId);
+            }}
+          >
+            <Text style={styles.buttonText}>Cerca</Text>
+          </TouchableOpacity>
+          <TouchableOpacity
+            style={[styles.button, { backgroundColor: 'gray' }]}
+            onPress={() => setManualIdInputVisible(false)}
+          >
+            <Text style={styles.buttonText}>Annulla</Text>
+          </TouchableOpacity>
+        </View>
+      </Modal>
     </View>
   );
 }
@@ -300,11 +350,10 @@ const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: '#000' },
   center: { flex: 1, justifyContent: 'center', alignItems: 'center', padding: 20 },
   openButton: {
-    alignSelf: 'center',
-    marginTop: '50%',
     backgroundColor: '#0066cc',
     padding: 15,
     borderRadius: 10,
+    marginTop: 20,
   },
   button: {
     marginTop: 20,
@@ -336,6 +385,16 @@ const styles = StyleSheet.create({
   ocrText: {
     fontSize: 16,
     color: '#333',
-    textAlign: 'center',
+    marginBottom: 10,
+  },
+  input: {
+    height: 50,
+    width: '80%',
+    borderColor: '#ccc',
+    borderWidth: 1,
+    borderRadius: 10,
+    paddingHorizontal: 15,
+    backgroundColor: 'white',
+    marginBottom: 15,
   },
 });
